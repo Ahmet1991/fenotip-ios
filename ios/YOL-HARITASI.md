@@ -88,4 +88,27 @@ fark edeceği bir iyileştirme ya da somut bir sağlamlık düzeltmesi; "kod dü
 - [x] iP039 — Oynatıcı açılışından ilk kareye kadar geçen süreyi Diagnostics'e yaz.
 - [x] iP040 — Uzun süre etkileşimsiz dizi izlemeye Hâlâ izliyor musun? kontrolü ve sarma sırasında yüzde göstergesi ekle.
 
+### P03
+
+- [x] iP041 — Raf başlığına ve raf sonundaki karta dokununca o rafın tüm öğelerini ızgarada aç.
+- [x] iP042 — Katalog yüklenirken shimmer afiş iskeletleri; boş/hata durumunda açıklama ve Tekrar dene kartı göster.
+- [x] iP043 — Vitrini 6 saniyede bir otomatik ilerlet; kullanıcı dokununca durdur; tür, kısa özet ve IMDb bilgisini göster.
+- [x] iP044 — Ana sayfa başlığında saate göre selamlama, profil adı ve profil emojisini göster.
+- [x] iP045 — Ayarlar'a cihaz özel Ana sayfa rafları ekranı ekle; rafları göster/gizle ve yeniden sırala.
+- [x] iP046 — Favori kanallar için Canlı şimdi rafı ekle; mevcut programı ve yayın ilerlemesini göster.
+- [x] iP047 — Devam öğelerini Bitmek üzere rafına ayır; bitirilen filmleri Yeniden izle rafında göster.
+- [x] iP048 — İyi puanlı ve izlenmemiş adaylardan Şansıma bir film kısayolu ve yeni aday seçme düğmesi ekle.
+- [x] iP049 — Afişe basılı tutunca afiş, yıl, puan ve varsa kısa özet içeren bağlam menüsü önizlemesi göster.
+- [x] iP050 — Ana Sayfa sekmesine ikinci kez dokununca sayfayı en üste kaydır.
+- [x] iP051 — Yatay rafları iOS 17'de afişe hizalı kaydır; iOS 16'da güvenli klasik kaydırmayı koru.
+- [x] iP052 — Son güncelleme saatini ve aşağı çekerek yenileme sırasında görsel geri bildirimi göster.
+- [x] iP053 — Ana sayfa poster raflarında 3D/özel sürümleri merkezi olarak dışarıda tut.
+- [x] iP054 — Bugün eklenen film sayısını ana sayfada küçük rozet olarak göster.
+- [x] iP055 — Gün bazında değişen iki tür rafı üret; izlenen içerikleri bu seçkilerden çıkar.
+- [x] iP056 — Listem'i son eklenen önce sırala ve Listem'i düzenle kısayolunu raf başlığına ekle.
+- [x] iP057 — Ana sayfanın ağır süzme ve raf hesaplarını View.body dışındaki önbellekli HomeDashboard hazırlığına taşı.
+- [x] iP058 — Afişlerde izlenmiş içerik için ✓ işareti ve izleme ilerlemesi için tutarlı çubuk göster.
+- [x] iP059 — Vitrine Listeme ekle/Listemde ve TV'de oynat kısayollarını ekle.
+- [x] iP060 — Ana sayfa raflarını sınırlı sayıda kartla göster; uzun rafların sonuna Tümünü gör kartı ekle.
+
 (Paketler burada maddelerini listeler.)

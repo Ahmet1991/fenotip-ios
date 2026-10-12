@@ -158,22 +158,40 @@ struct ProfilePickerView: View {
 
 struct MainTabView: View {
     @EnvironmentObject private var tv: TvRemote
+    @State private var selection = 0
 
     var body: some View {
-        TabView {
+        TabView(selection: selectionBinding) {
             NavigationStack { HomeView() }
                 .tabItem { Label("Ana Sayfa", systemImage: "house.fill") }
+                .tag(0)
             NavigationStack { LibraryView(kind: .movie) }
                 .tabItem { Label("Filmler", systemImage: "film") }
+                .tag(1)
             NavigationStack { LibraryView(kind: .series) }
                 .tabItem { Label("Diziler", systemImage: "tv") }
+                .tag(2)
             NavigationStack { LiveView() }
                 .tabItem { Label("Canlı TV", systemImage: "dot.radiowaves.left.and.right") }
+                .tag(3)
             NavigationStack { SearchView() }
                 .tabItem { Label("Ara", systemImage: "magnifyingglass") }
+                .tag(4)
         }
         .sheet(isPresented: $tv.showPairing) { TvPairingView().environmentObject(tv) }
         .sheet(isPresented: $tv.showRemote) { TvRemoteView().environmentObject(tv) }
+    }
+
+    private var selectionBinding: Binding<Int> {
+        Binding(
+            get: { selection },
+            set: { next in
+                if next == selection, next == 0 {
+                    NotificationCenter.default.post(name: .fenotipHomeTabReselected, object: nil)
+                }
+                selection = next
+            }
+        )
     }
 }
 

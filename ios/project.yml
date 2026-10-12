@@ -23,7 +23,7 @@ targets:
       properties:
         CFBundleDisplayName: Fenotip
         CFBundleShortVersionString: "1.2.0"
-        CFBundleVersion: "11"
+        CFBundleVersion: "12"
         LSRequiresIPhoneOS: true
         UIBackgroundModes:
           - audio

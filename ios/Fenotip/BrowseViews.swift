@@ -1,80 +1,52 @@
+import Combine
 import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject private var app: AppModel
+    @AppStorage(HomeShelfID.orderKey) private var shelfOrder = ""
+    @AppStorage(HomeShelfID.hiddenKey) private var hiddenShelves = ""
+    @State private var refreshing = false
+    private let topAnchor = "fenotip-home-top"
 
     var body: some View {
-        let movies = app.uniqueMovies.filter { $0.variant == nil }
-        let series = app.uniqueSeries.filter { $0.variant == nil }
-        let resume = app.continueWatching
-        let favorites = app.channels(app.state.favoriteLiveChannelIds)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                let featured = app.featuredMovies.isEmpty ? featuredItems(movies) : app.featuredMovies
-                if featured.isEmpty {
-                    Color.clear.frame(height: 90)
-                } else {
-                    FeaturedCarousel(items: featured)
-                }
-                if !resume.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeader(title: "İzlemeye devam et")
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(alignment: .top, spacing: 12) {
-                                ForEach(resume) { item in
-                                    ContinueCard(item: item)
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                        }
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 26) {
+                    Color.clear.frame(height: 1).id(topAnchor)
+                    let featured = app.featuredMovies.isEmpty ? app.home.featuredFallback : app.featuredMovies
+                    if featured.isEmpty {
+                        Color.clear.frame(height: 90)
+                    } else {
+                        FeaturedCarousel(items: featured)
+                    }
+                    homeSummary
+                    CatalogStatus(kind: .movie)
+                    ForEach(visibleShelfOrder) { shelf in
+                        shelfView(shelf)
                     }
                 }
-                if !app.upNext.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeader(title: "Sıradaki bölümler")
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(alignment: .top, spacing: 12) {
-                                ForEach(app.upNext) { item in UpNextCard(item: item) }
-                            }
-                            .padding(.horizontal, 16)
-                        }
-                    }
-                }
-                PosterRow(title: "Listem", items: app.myList)
-                ForEach(app.forYou) { shelf in
-                    PosterRow(title: shelf.title, items: shelf.items)
-                }
-                if !favorites.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeader(title: "Favori kanallar")
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(spacing: 10) {
-                                ForEach(favorites, id: \.key) { channel in
-                                    ChannelTile(channel: channel, playlist: favorites)
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                        }
-                    }
-                }
-                CatalogStatus(kind: .movie)
-                TopTenRow(items: app.top10Movies)
-                PosterRow(title: "Yeni eklenen filmler", items: Array(movies.prefix(30)))
-                PosterRow(title: "Yeni eklenen diziler", items: Array(series.prefix(30)))
-                PosterRow(title: "IMDb'de yüksek puanlı filmler", items: app.topMovies)
-                PosterRow(title: "IMDb'de yüksek puanlı diziler", items: app.topSeries)
+                .padding(.bottom, 24)
             }
-            .padding(.bottom, 24)
-        }
-        .ignoresSafeArea(edges: .top)
-        .overlay(alignment: .top) { HomeHeader() }
-        .refreshable {
-            await app.refreshState()
-            await app.loadLibrary(force: true)
+            .ignoresSafeArea(edges: .top)
+            .overlay(alignment: .top) { HomeHeader() }
+            .refreshable {
+                refreshing = true
+                await app.refreshState()
+                await app.loadLibrary(force: true)
+                app.prepareHomeDashboard()
+                refreshing = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fenotipHomeTabReselected)) { _ in
+                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(topAnchor, anchor: .top) }
+            }
         }
         .task { await app.loadCatalog(.live) }
-        .task(id: app.uniqueMovies.count + app.uniqueSeries.count) { await app.prepareHomeShelves() }
-        .task(id: recommendationKey) {
+        .task(id: app.uniqueMovies.count + app.uniqueSeries.count) {
+            await app.prepareHomeShelves()
+            app.prepareHomeDashboard()
+        }
+        .task(id: app.homeGeneration) {
+            app.prepareHomeDashboard()
             app.prepareRecommendations()
             await app.prepareUpNext()
         }
@@ -82,23 +54,115 @@ struct HomeView: View {
         .fenotipNavigation()
     }
 
-    private var recommendationKey: String {
-        "\(app.state.recent.prefix(6).map(\.id).joined(separator: ","))|\(app.movies.count)|\(app.series.count)"
+    private var visibleShelfOrder: [HomeShelfID] {
+        let hidden = HomeShelfID.hidden(from: hiddenShelves)
+        return HomeShelfID.ordered(from: shelfOrder).filter { !hidden.contains($0) }
     }
 
-    /// Vitrin (IMDb sonucu gelene kadar): en yeni, afişli ve puanı fena olmayan filmler.
-    private func featuredItems(_ movies: [CatalogItem]) -> [CatalogItem] {
-        Array(movies.prefix(200).filter { $0.artwork != nil && ($0.trustedRating ?? 6) >= 6 }.prefix(6))
+    @ViewBuilder
+    private var homeSummary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if app.home.todayMovieCount > 0 {
+                    Label("Bugün eklenen \(app.home.todayMovieCount) film", systemImage: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(Theme.card, in: Capsule())
+                }
+                Spacer()
+                if refreshing {
+                    ProgressView().controlSize(.small).tint(.white)
+                    Text("Yenileniyor…").font(.caption).foregroundStyle(Theme.muted)
+                }
+            }
+            if let lucky = app.home.luckyMovie {
+                HStack(spacing: 12) {
+                    NavigationLink(value: lucky) {
+                        Label("Şansıma bir film", systemImage: "dice.fill")
+                            .font(.subheadline.weight(.bold))
+                            .padding(.horizontal, 13).padding(.vertical, 9)
+                            .background(Theme.accent, in: Capsule())
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                    Button { app.shuffleLuckyMovie() } label: {
+                        Image(systemName: "shuffle")
+                            .frame(width: 36, height: 36)
+                            .background(Theme.card, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Başka film seç")
+                }
+            }
+            Text(lastUpdateText)
+                .font(.caption2)
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private var lastUpdateText: String {
+        guard let date = app.homeLastUpdated else { return "Son güncelleme bilgisi bekleniyor" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return "Son güncelleme: \(formatter.string(from: date))"
+    }
+
+    @ViewBuilder
+    private func shelfView(_ shelf: HomeShelfID) -> some View {
+        switch shelf {
+        case .continueWatching:
+            ContinueShelf(title: shelf.title, items: app.home.continueWatching)
+        case .almostDone:
+            ContinueShelf(title: shelf.title, items: app.home.almostDone)
+        case .upNext:
+            UpNextShelf(items: app.upNext)
+        case .myList:
+            PosterRow(title: shelf.title, items: app.home.myList, actionTitle: "Listem'i düzenle")
+        case .forYou:
+            ForEach(app.forYou) { recommendation in
+                PosterRow(title: recommendation.title, items: recommendation.items)
+            }
+        case .liveNow:
+            LiveNowShelf(title: shelf.title, channels: app.home.favorites)
+        case .favoriteChannels:
+            FavoriteChannelShelf(title: shelf.title, channels: app.home.favorites)
+        case .replay:
+            PosterRow(title: shelf.title, items: app.home.replay)
+        case .top10:
+            TopTenRow(items: app.top10Movies)
+        case .newMovies:
+            PosterRow(title: shelf.title, items: app.home.newMovies)
+        case .newSeries:
+            PosterRow(title: shelf.title, items: app.home.newSeries)
+        case .topMovies:
+            PosterRow(title: shelf.title, items: app.topMovies)
+        case .topSeries:
+            PosterRow(title: shelf.title, items: app.topSeries)
+        case .dailyGenres:
+            ForEach(app.home.dailyGenres) { genreShelf in
+                PosterRow(title: genreShelf.title, items: genreShelf.items)
+            }
+        }
     }
 }
 
 /// Üstte logo, TV ve profil; vitrinin üzerinde, okunur kalsın diye koyu geçişli.
 private struct HomeHeader: View {
+    @EnvironmentObject private var app: AppModel
     @EnvironmentObject private var tv: TvRemote
 
     var body: some View {
         HStack(spacing: 18) {
-            BrandLogo(height: 38)
+            VStack(alignment: .leading, spacing: 2) {
+                BrandLogo(height: 30)
+                if let profile = app.profile {
+                    Text("\(greeting), \(profile.name.uppercased()) \(profile.emoji)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineLimit(1)
+                }
+            }
             Spacer()
             Button { tv.open() } label: {
                 Image(systemName: tv.link == nil ? "tv" : "appletvremote.gen4.fill")
@@ -115,11 +179,21 @@ private struct HomeHeader: View {
                 .ignoresSafeArea(edges: .top)
         )
     }
+
+    private var greeting: String {
+        switch Calendar.current.component(.hour, from: Date()) {
+        case 5..<12: return "Günaydın"
+        case 12..<18: return "İyi günler"
+        default: return "İyi akşamlar"
+        }
+    }
 }
 
 struct FeaturedCarousel: View {
     let items: [CatalogItem]
     @State private var page = 0
+    @State private var pausedByUser = false
+    private let timer = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
 
     var body: some View {
         TabView(selection: $page) {
@@ -129,6 +203,15 @@ struct FeaturedCarousel: View {
         }
         .tabViewStyle(.page(indexDisplayMode: .always))
         .frame(height: 520)
+        .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in pausedByUser = true })
+        .onReceive(timer) { _ in
+            guard !pausedByUser, items.count > 1 else { return }
+            withAnimation(.easeInOut(duration: 0.35)) { page = (page + 1) % items.count }
+        }
+        .onChange(of: items.count) { count in
+            if count == 0 { page = 0 }
+            else if page >= count { page = count - 1 }
+        }
     }
 }
 
@@ -139,6 +222,7 @@ private struct FeaturedSlide: View {
 
     var body: some View {
         let saved = app.isSaved(item)
+        let metadata = app.homeMetadata[item.key]
         ZStack(alignment: .bottomLeading) {
             Rectangle()
                 .fill(Theme.card)
@@ -155,12 +239,18 @@ private struct FeaturedSlide: View {
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .minimumScaleFactor(0.7)
-                Text([item.year.map { String($0) }, app.imdbRating(item).map { String(format: "IMDb %.1f", $0) } ?? item.trustedRating.map { String(format: "★ %.1f", $0) }].compactMap { $0 }.joined(separator: " · "))
+                Text([metadata?.genre, item.year.map { String($0) }, app.imdbRating(item).map { String(format: "IMDb %.1f", $0) } ?? item.trustedRating.map { String(format: "★ %.1f", $0) }].compactMap { $0 }.joined(separator: " · "))
                     .font(.subheadline)
                     .foregroundStyle(Theme.muted)
+                if let plot = metadata?.plot, !plot.isEmpty {
+                    Text(plot)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(3)
+                }
                 HStack(spacing: 12) {
                     Button {
-                        app.play(PlaybackItem(kind: .movie, contentId: item.id, seriesId: nil, title: item.title, artwork: item.artwork, ext: item.ext ?? "mp4", startAt: app.resumePosition(.movie, item.id), episodes: [], seriesTitle: nil))
+                        app.play(playback)
                     } label: {
                         Label(app.resumePosition(.movie, item.id) > 0 ? "Devam et" : "İzle", systemImage: "play.fill")
                             .font(.headline)
@@ -171,13 +261,22 @@ private struct FeaturedSlide: View {
                     Button {
                         app.toggleMyList(item)
                     } label: {
-                        Image(systemName: saved ? "checkmark" : "plus")
-                            .font(.headline)
-                            .frame(width: 44, height: 44)
-                            .background(Color.white.opacity(0.18), in: Circle())
-                            .foregroundStyle(Color.white)
+                        Label(saved ? "Listemde" : "Listeme ekle", systemImage: saved ? "checkmark" : "plus")
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 11).frame(height: 44)
+                            .background(Color.white.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.white)
                     }
                     .accessibilityLabel(saved ? "Listemden çıkar" : "Listeme ekle")
+                    Button {
+                        Task { _ = await app.tv.play(playback, at: playback.startAt) }
+                    } label: {
+                        Label("TV'de oynat", systemImage: "tv")
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 11).frame(height: 44)
+                            .background(Color.white.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.white)
+                    }
                     NavigationLink(value: item) {
                         Image(systemName: "info.circle")
                             .font(.headline)
@@ -192,7 +291,15 @@ private struct FeaturedSlide: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 40)
         }
-        .task { backdrop = await app.backdrop(for: item) }
+        .task {
+            backdrop = await app.backdrop(for: item)
+            await app.loadHomeMetadata(for: item)
+        }
+    }
+
+    private var playback: PlaybackItem {
+        PlaybackItem(kind: .movie, contentId: item.id, seriesId: nil, title: item.title, artwork: item.artwork,
+                     ext: item.ext ?? "mp4", startAt: app.resumePosition(.movie, item.id), episodes: [], seriesTitle: nil)
     }
 }
 
@@ -302,6 +409,189 @@ struct UpNextCard: View {
                 Label("İzlendi olarak işaretle", systemImage: "checkmark.circle")
             }
         }
+    }
+}
+
+private struct ContinueShelf: View {
+    let title: String
+    let items: [ContinueItem]
+    private let limit = 12
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                NavigationLink {
+                    ContinueShelfAllView(title: title, items: items)
+                } label: {
+                    ShelfHeader(title: title)
+                }
+                .buttonStyle(.plain)
+                if #available(iOS 17.0, *) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        row.scrollTargetLayout()
+                    }
+                    .scrollTargetBehavior(.viewAligned)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) { row }
+                }
+            }
+        }
+    }
+
+    private var row: some View {
+        LazyHStack(alignment: .top, spacing: 12) {
+            ForEach(items.prefix(limit)) { item in ContinueCard(item: item) }
+            if items.count > limit {
+                NavigationLink {
+                    ContinueShelfAllView(title: title, items: items)
+                } label: {
+                    VStack(spacing: 8) {
+                        Image(systemName: "square.grid.2x2").font(.title2)
+                        Text("Tümünü gör").font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: 150, height: 130)
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct ContinueShelfAllView: View {
+    let title: String
+    let items: [ContinueItem]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 18) {
+                ForEach(items) { item in ContinueCard(item: item) }
+            }
+            .padding(16)
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct UpNextShelf: View {
+    let items: [UpNextEpisode]
+    private let limit = 12
+
+    var body: some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                NavigationLink {
+                    UpNextShelfAllView(items: items)
+                } label: {
+                    ShelfHeader(title: "Sıradaki bölümler")
+                }
+                .buttonStyle(.plain)
+                if #available(iOS 17.0, *) {
+                    ScrollView(.horizontal, showsIndicators: false) { row.scrollTargetLayout() }
+                        .scrollTargetBehavior(.viewAligned)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) { row }
+                }
+            }
+        }
+    }
+
+    private var row: some View {
+        LazyHStack(alignment: .top, spacing: 12) {
+            ForEach(items.prefix(limit)) { item in UpNextCard(item: item) }
+            if items.count > limit {
+                NavigationLink { UpNextShelfAllView(items: items) } label: {
+                    VStack(spacing: 8) {
+                        Image(systemName: "square.grid.2x2").font(.title2)
+                        Text("Tümünü gör").font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: 150, height: 130)
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct UpNextShelfAllView: View {
+    let items: [UpNextEpisode]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 18) {
+                ForEach(items) { item in UpNextCard(item: item) }
+            }
+            .padding(16)
+        }
+        .navigationTitle("Sıradaki bölümler")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct LiveNowShelf: View {
+    let title: String
+    let channels: [CatalogItem]
+
+    var body: some View {
+        FavoriteChannelShelf(title: title, channels: channels)
+    }
+}
+
+private struct FavoriteChannelShelf: View {
+    let title: String
+    let channels: [CatalogItem]
+    private let limit = 12
+
+    var body: some View {
+        if !channels.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                NavigationLink {
+                    FavoriteChannelsAllView(title: title, channels: channels)
+                } label: {
+                    ShelfHeader(title: title)
+                }
+                .buttonStyle(.plain)
+                if #available(iOS 17.0, *) {
+                    ScrollView(.horizontal, showsIndicators: false) { row.scrollTargetLayout() }
+                        .scrollTargetBehavior(.viewAligned)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) { row }
+                }
+            }
+        }
+    }
+
+    private var row: some View {
+        LazyHStack(spacing: 10) {
+            ForEach(channels.prefix(limit), id: \.key) { channel in
+                ChannelTile(channel: channel, playlist: channels)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+private struct FavoriteChannelsAllView: View {
+    let title: String
+    let channels: [CatalogItem]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 14)], spacing: 18) {
+                ForEach(channels, id: \.key) { channel in
+                    ChannelTile(channel: channel, playlist: channels)
+                }
+            }
+            .padding(16)
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -712,28 +1002,40 @@ struct TopTenRow: View {
     var body: some View {
         if items.count >= 5 {
             VStack(alignment: .leading, spacing: 10) {
-                SectionHeader(title: "Yeni filmlerde Top 10")
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .bottom, spacing: 6) {
-                        ForEach(Array(items.enumerated()), id: \.element.key) { index, item in
-                            NavigationLink(value: item) {
-                                HStack(alignment: .bottom, spacing: -10) {
-                                    Text("\(index + 1)")
-                                        .font(.system(size: 92, weight: .black, design: .rounded))
-                                        .foregroundStyle(Theme.accent.opacity(0.85))
-                                        .shadow(color: .black.opacity(0.8), radius: 4)
-                                        .padding(.bottom, 26)
-                                    PosterCard(item: item, width: 108)
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .myListMenu(item)
-                        }
-                    }
-                    .padding(.horizontal, 16)
+                NavigationLink {
+                    HomeShelfGrid(title: "Yeni filmlerde Top 10", items: items)
+                } label: {
+                    ShelfHeader(title: "Yeni filmlerde Top 10")
+                }
+                .buttonStyle(.plain)
+                if #available(iOS 17.0, *) {
+                    ScrollView(.horizontal, showsIndicators: false) { row.scrollTargetLayout() }
+                        .scrollTargetBehavior(.viewAligned)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) { row }
                 }
             }
         }
+    }
+
+    private var row: some View {
+        LazyHStack(alignment: .bottom, spacing: 6) {
+            ForEach(Array(items.prefix(10).enumerated()), id: \.element.key) { index, item in
+                NavigationLink(value: item) {
+                    HStack(alignment: .bottom, spacing: -10) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 92, weight: .black, design: .rounded))
+                            .foregroundStyle(Theme.accent.opacity(0.85))
+                            .shadow(color: .black.opacity(0.8), radius: 4)
+                            .padding(.bottom, 26)
+                        PosterCard(item: item, width: 108)
+                    }
+                }
+                .buttonStyle(.plain)
+                .myListMenu(item)
+            }
+        }
+        .padding(.horizontal, 16)
     }
 }
 
@@ -812,6 +1114,7 @@ struct ChannelTile: View {
                 Text(channel.title).font(.caption.weight(.semibold)).lineLimit(1).frame(width: 120)
                 if let current = app.nowNext(channel.id)?.current {
                     Text(current.title).font(.caption2).foregroundStyle(Theme.muted).lineLimit(1).frame(width: 120)
+                    ProgressBar(value: current.progress).clipShape(Capsule()).frame(width: 120)
                 }
             }
         }

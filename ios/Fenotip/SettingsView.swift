@@ -55,6 +55,8 @@ struct SettingsView: View {
     @AppStorage(PlayerDeviceSettings.doubleTapSeekSecondsKey) private var doubleTapSeekSeconds = 10
     @AppStorage(PlayerDeviceSettings.movieOrientationKey) private var movieOrientation = "automatic"
     @AppStorage(PlayerDeviceSettings.backgroundAudioKey) private var backgroundAudio = false
+    @AppStorage(HomeShelfID.orderKey) private var homeShelfOrder = ""
+    @AppStorage(HomeShelfID.hiddenKey) private var hiddenHomeShelves = ""
 
     static let languages: [(code: String, name: String)] = [
         ("tr", "Türkçe"), ("en", "İngilizce"), ("de", "Almanca"), ("fr", "Fransızca"), ("es", "İspanyolca"),
@@ -110,6 +112,15 @@ struct SettingsView: View {
                     Text("Bu cihaz")
                 } footer: {
                     Text("Bu ayarlar yalnız bu iPhone/iPad'de saklanır. Arka plan sesi varsayılan olarak kapalıdır.")
+                }
+                Section {
+                    NavigationLink("Ana sayfa rafları") {
+                        HomeShelfSettingsView(orderRaw: $homeShelfOrder, hiddenRaw: $hiddenHomeShelves)
+                    }
+                } header: {
+                    Text("Ana sayfa")
+                } footer: {
+                    Text("Rafları göster/gizle ve sırasını değiştir. Bu düzen yalnız bu cihazda saklanır.")
                 }
                 Section("TV") {
                     if let link = tv.link {
@@ -189,5 +200,41 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+}
+
+private struct HomeShelfSettingsView: View {
+    @Binding var orderRaw: String
+    @Binding var hiddenRaw: String
+
+    var body: some View {
+        List {
+            ForEach(HomeShelfID.ordered(from: orderRaw)) { shelf in
+                Toggle(isOn: visibilityBinding(for: shelf)) {
+                    Text(shelf.title)
+                }
+            }
+            .onMove(perform: move)
+        }
+        .navigationTitle("Ana sayfa rafları")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { EditButton() }
+    }
+
+    private func visibilityBinding(for shelf: HomeShelfID) -> Binding<Bool> {
+        Binding(
+            get: { !HomeShelfID.hidden(from: hiddenRaw).contains(shelf) },
+            set: { visible in
+                var hidden = HomeShelfID.hidden(from: hiddenRaw)
+                if visible { hidden.remove(shelf) } else { hidden.insert(shelf) }
+                hiddenRaw = HomeShelfID.encode(hidden)
+            }
+        )
+    }
+
+    private func move(from source: IndexSet, to destination: Int) {
+        var order = HomeShelfID.ordered(from: orderRaw)
+        order.move(fromOffsets: source, toOffset: destination)
+        orderRaw = HomeShelfID.encode(order)
     }
 }

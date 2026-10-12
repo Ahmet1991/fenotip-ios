@@ -39,7 +39,14 @@ final class AppModel: ObservableObject {
     @Published var forYou: [HomeShelf] = []
     /// Bitirdiğin bölümün sıradakisi (yeni eklendiyse işaretli).
     @Published var upNext: [UpNextEpisode] = []
+    /// Ana sayfada kullanılan hazır/süzülmüş diziler; ağır hesaplar View.body dışında tutulur.
+    @Published var home = HomeDashboard.empty
+    @Published var homeMetadata: [String: HomeItemMetadata] = [:]
+    @Published var homeLastUpdated: Date?
+    @Published var homeGeneration = 0
     private var seriesDetailsCache: [String: (details: SeriesDetails, fetchedAt: Date)] = [:]
+    private var movieDetailsCache: [String: (details: MovieDetails, fetchedAt: Date)] = [:]
+    private var luckyMovieCandidates: [CatalogItem] = []
 
     let server: ServerAPI
     let tv: TvRemote
@@ -114,6 +121,9 @@ final class AppModel: ObservableObject {
         await server.logout()
         profile = nil
         state = .empty
+        home = .empty
+        homeMetadata = [:]
+        homeGeneration &+= 1
         stage = .login
     }
 
@@ -122,6 +132,7 @@ final class AppModel: ObservableObject {
         profile = response.profile
         state = response.state
         lastStateRefresh = Date()
+        homeGeneration &+= 1
     }
 
     /// Uygulama öne gelince PC'de izlenenler de görünsün.
@@ -136,6 +147,7 @@ final class AppModel: ObservableObject {
             if let next = try? await self.server.mutate(mutation) {
                 self.state = next
                 self.lastStateRefresh = Date()
+                self.homeGeneration &+= 1
             }
         }
     }
@@ -201,6 +213,10 @@ final class AppModel: ObservableObject {
         byId[kind] = Dictionary(bundle.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         categories[kind] = bundle.categories
         genreIndex[kind] = kind == .live ? [:] : MovieGenre.index(bundle.categories)
+        if kind != .live {
+            homeLastUpdated = Date(timeIntervalSince1970: bundle.storedAt)
+        }
+        homeGeneration &+= 1
     }
 
     func uniqueItems(_ kind: ContentKind) -> [CatalogItem] {
@@ -235,10 +251,47 @@ final class AppModel: ObservableObject {
     /// Vitrin için geniş görsel (film bilgisinden); bir kez alınır.
     func backdrop(for item: CatalogItem) async -> URL? {
         if let known = backdrops[item.key] { return known }
-        guard item.kind == .movie, let provider, let details = try? await provider.movieDetails(id: item.id) else { return nil }
+        guard item.kind == .movie, let details = await cachedMovieDetails(id: item.id) else { return nil }
         guard let raw = details.backdrop ?? details.poster, let url = URL(string: raw) else { return nil }
         backdrops[item.key] = url
         return url
+    }
+
+    private func cachedMovieDetails(id: String) async -> MovieDetails? {
+        if let cached = movieDetailsCache[id], Date().timeIntervalSince(cached.fetchedAt) < 1800 {
+            return cached.details
+        }
+        guard let provider, let details = try? await provider.movieDetails(id: id) else { return nil }
+        movieDetailsCache[id] = (details, Date())
+        return details
+    }
+
+    /// Vitrin ve uzun basma önizlemesi için kısa tür/özet bilgisini tek kez yükler.
+    func loadHomeMetadata(for item: CatalogItem) async {
+        guard homeMetadata[item.key] == nil, item.kind != .live else { return }
+        switch item.kind {
+        case .movie:
+            guard let details = await cachedMovieDetails(id: item.id) else { return }
+            homeMetadata[item.key] = HomeItemMetadata(genre: details.genre, plot: details.plot)
+            if let raw = details.backdrop ?? details.poster, let url = URL(string: raw) {
+                backdrops[item.key] = url
+            }
+        case .series:
+            let details: SeriesDetails?
+            if let cached = seriesDetailsCache[item.id], Date().timeIntervalSince(cached.fetchedAt) < 1800 {
+                details = cached.details
+            } else if let provider, let fetched = try? await provider.seriesDetails(id: item.id) {
+                seriesDetailsCache[item.id] = (fetched, Date())
+                details = fetched
+            } else {
+                details = nil
+            }
+            if let details {
+                homeMetadata[item.key] = HomeItemMetadata(genre: details.genre, plot: details.plot)
+            }
+        case .live:
+            break
+        }
     }
 
     // MARK: IMDb (sitedeki imdb-gate: raflar ve puan sıralaması oy sayısına göre)
@@ -473,6 +526,100 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Ana sayfanın katalog/profil tabanlı raflarını tek sefer hesaplar.
+    func prepareHomeDashboard() {
+        let movies = uniqueMovies.filter { $0.variant == nil }
+        let seriesItems = uniqueSeries.filter { $0.variant == nil }
+        let allContinue = continueWatching.filter { entry in
+            guard let kind = entry.entry.kind else { return false }
+            if kind == .movie {
+                return item(.movie, id: entry.entry.id)?.variant == nil
+            }
+            if kind == .series, let seriesId = entry.entry.seriesId {
+                return item(.series, id: seriesId)?.variant == nil
+            }
+            return kind != .live
+        }
+        let almostDone = allContinue.filter { $0.position.fraction >= 0.85 }
+        let regularContinue = allContinue.filter { $0.position.fraction < 0.85 }
+
+        var watchedSearchKeys = Set<String>()
+        for entry in state.recent {
+            guard let kind = entry.kind else { continue }
+            if kind == .movie, let known = item(.movie, id: entry.id) {
+                watchedSearchKeys.insert(known.searchKey)
+            } else if kind == .series, let seriesId = entry.seriesId, let known = item(.series, id: seriesId) {
+                watchedSearchKeys.insert(known.searchKey)
+            }
+        }
+
+        var replaySeen = Set<String>()
+        let replay = state.recent.sorted { $0.updatedAt > $1.updatedAt }.compactMap { entry -> CatalogItem? in
+            guard entry.kind == .movie,
+                  let position = position(.movie, entry.id), position.fraction >= 0.95,
+                  let known = item(.movie, id: entry.id), known.variant == nil,
+                  replaySeen.insert(known.searchKey).inserted else { return nil }
+            return known
+        }
+
+        let availableSlugs = Set(availableGenres(.movie).map(\.slug) + availableGenres(.series).map(\.slug))
+        let available = MovieGenre.all.filter { availableSlugs.contains($0.slug) }
+        let day = Calendar.current.ordinality(of: .day, in: .year, for: Date()) ?? 1
+        var selectedGenres: [MovieGenre] = []
+        if !available.isEmpty {
+            selectedGenres.append(available[(day - 1) % available.count])
+            if available.count > 1 {
+                var second = available[(day * 5 + 3) % available.count]
+                if second.slug == selectedGenres[0].slug {
+                    second = available[day % available.count]
+                }
+                selectedGenres.append(second)
+            }
+        }
+        let dailyGenres = selectedGenres.compactMap { genre -> HomeShelf? in
+            let moviePicks = movies.lazy.filter {
+                hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
+            }.prefix(30)
+            let seriesPicks = seriesItems.lazy.filter {
+                hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
+            }.prefix(30)
+            let items = Array((Array(moviePicks) + Array(seriesPicks)).prefix(48))
+            guard items.count >= 4 else { return nil }
+            return HomeShelf(id: "daily-\(genre.slug)", title: "Bugünün \(genre.label) seçkisi", items: items)
+        }
+
+        let luckyCandidates = movies.filter { candidate in
+            guard candidate.artwork != nil, !watchedSearchKeys.contains(candidate.searchKey) else { return false }
+            return (verifiedRating(candidate, minVotes: 1_000) ?? candidate.trustedRating ?? 0) >= 6.5
+        }
+        luckyMovieCandidates = luckyCandidates
+        let currentLucky = home.luckyMovie.flatMap { current in
+            luckyCandidates.first { $0.key == current.key }
+        }
+
+        let startOfToday = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+        home = HomeDashboard(
+            featuredFallback: Array(movies.prefix(200).filter { $0.artwork != nil && ($0.trustedRating ?? 6) >= 6 }.prefix(6)),
+            continueWatching: regularContinue,
+            almostDone: almostDone,
+            replay: Array(replay.prefix(60)),
+            myList: myList.filter { $0.variant == nil },
+            favorites: channels(state.favoriteLiveChannelIds),
+            newMovies: Array(movies.prefix(200)),
+            newSeries: Array(seriesItems.prefix(200)),
+            dailyGenres: dailyGenres,
+            todayMovieCount: movies.reduce(into: 0) { count, movie in
+                if (movie.addedAt ?? 0) >= startOfToday { count += 1 }
+            },
+            luckyMovie: currentLucky ?? luckyCandidates.randomElement()
+        )
+    }
+
+    func shuffleLuckyMovie() {
+        let alternatives = luckyMovieCandidates.filter { $0.key != home.luckyMovie?.key }
+        home.luckyMovie = (alternatives.isEmpty ? luckyMovieCandidates : alternatives).randomElement()
+    }
+
     /// "Puana göre" sıralama: IMDb'de yeterli oyu olanlar IMDb puanıyla önde; ötekiler sağlayıcı puanıyla
     /// (şişkin 9,3+ değerler puansız sayılır) arkada. Adayların IMDb'si ensureImdb ile önceden alınır.
     func rankedByRating(_ items: [CatalogItem]) -> [CatalogItem] {
@@ -538,6 +685,7 @@ final class AppModel: ObservableObject {
         guard kind != .live, position > 0 || allowZero else { return }
         let now = (Date().timeIntervalSince1970 * 1000).rounded()
         state.positions["\(kind.rawValue):\(id)"] = WatchPosition(position: position, duration: duration, updatedAt: now)
+        homeGeneration &+= 1
         mutate(["type": "setProgress", "kind": kind.rawValue, "id": id, "position": position, "duration": duration, "updatedAt": now])
     }
 
@@ -546,6 +694,7 @@ final class AppModel: ObservableObject {
         guard let kind = item.entry.kind else { return }
         let id = item.entry.id
         state.recent.removeAll { $0.kind == kind && $0.id == id }
+        homeGeneration &+= 1
         mutate(["type": "removeRecent", "kind": kind.rawValue, "id": id])
     }
 
@@ -567,13 +716,14 @@ final class AppModel: ObservableObject {
         }
         state.recent.removeAll { $0.kind == item.kind && $0.id == item.contentId }
         state.recent.insert(RecentEntry(kind: item.kind, id: item.contentId, seriesId: item.seriesId, title: item.title, artwork: item.artwork, ext: item.ext, updatedAt: now), at: 0)
+        homeGeneration &+= 1
         mutate(["type": "upsertRecent", "item": entry])
     }
 
     // MARK: Listem ve favori kanallar (PC ile ortak)
 
     var myList: [CatalogItem] {
-        state.myList.compactMap { entry in
+        state.myList.sorted { $0.updatedAt > $1.updatedAt }.compactMap { entry in
             guard let kind = entry.kind else { return nil }
             if let known = item(kind, id: entry.id) { return known }
             return CatalogItem(id: entry.id, kind: kind, title: entry.title, artwork: entry.artwork, ext: entry.ext, year: nil, rating: nil, categoryId: nil, addedAt: nil, searchKey: TextFold.fold(entry.title), variant: nil)
@@ -600,6 +750,7 @@ final class AppModel: ObservableObject {
         if saved {
             state.myList.insert(RecentEntry(kind: item.kind, id: item.id, seriesId: nil, title: item.title, artwork: item.artwork, ext: item.ext, updatedAt: now), at: 0)
         }
+        homeGeneration &+= 1
         mutate(["type": "setMyList", "saved": saved, "item": entry])
     }
 
@@ -611,6 +762,7 @@ final class AppModel: ObservableObject {
         let saved = !isFavorite(channelId)
         state.favoriteLiveChannelIds.removeAll { $0 == channelId }
         if saved { state.favoriteLiveChannelIds.insert(channelId, at: 0) }
+        homeGeneration &+= 1
         mutate(["type": "setLiveFavorite", "channelId": channelId, "saved": saved])
     }
 
