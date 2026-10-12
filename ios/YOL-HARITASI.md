@@ -34,7 +34,9 @@ fark edeceği bir iyileştirme ya da somut bir sağlamlık düzeltmesi; "kod dü
 ## Kısıtlar (her paket için)
 
 - Yalnız `ios/**` (+ bu dosya, `IS-BOLUMU.md` Günlük satırı). Sunucu, site, Android, deploy YOK.
-- Mac yok: derleme yalnız GitHub Actions `ios-app.yml` (push → yeşil olana kadar düzelt).
+- Mac yok: derleme GitHub Actions `ios-app.yml` ile, ama **herkese açık ayna depoda** (Ahmet1991/fenotip-ios): özel depoda
+  işler ödeme sorunu yüzünden başlamıyor. Commit + push → `bash ios/scripts/ayna-guncelle.sh` →
+  `gh run list -R Ahmet1991/fenotip-ios --workflow ios-app.yml --limit 1` → `gh run watch <id> -R Ahmet1991/fenotip-ios --exit-status`.
 - Uygulama eklentisi (widget, extension) YOK: ücretsiz Apple hesabı her eklenti için ayrı App ID harcar.
 - Bilinen tuzaklar: VLC çizim alanı üstünde dokunma algılayıcıları cihazda tetiklenmiyor (touchesBegan/Moved/Ended
   kullan); VLC `stop()` ana iş parçacığında kilitlenebiliyor (`stopPlayerInBackground`); profil durumu PC/TV ile ortak.
@@ -63,5 +65,27 @@ fark edeceği bir iyileştirme ya da somut bir sağlamlık düzeltmesi; "kod dü
 - [x] iP018 — Arka plana geçerken ilerlemeyi kaydet; idle timer ve parlaklık durumunu çıkış/arka plan akışında kesin geri al.
 - [x] iP019 — Dizi başlığını "S1 B3 · Bölüm adı", canlı başlığını "Program · X dk kaldı" biçiminde göster.
 - [x] iP020 — Ses ve altyazı düğmelerinde etkin dil kısaltmasını (ör. EN/TR) göster.
+
+### P02
+- [x] iP021 — Kilit ekranı ve Denetim Merkezi için başlık, afiş, süre, konum ve hız bilgisini yayınla.
+- [x] iP022 — Kilit ekranından oynat/duraklat, ±10 sn ve konuma git komutlarını işle.
+- [x] iP023 — Oynatıcı kapanınca Şimdi Oynatılıyor bilgisini ve uzaktan komut hedeflerini temizle.
+- [x] iP024 — Oynatıcıya AirPlay / ses çıkışı seçicisi ekle.
+- [x] iP025 — Bölüm sonunda 10 sn Sonraki bölüm geri sayımı, Şimdi oynat ve İptal akışı ekle.
+- [x] iP026 — Dizide varsa Önceki bölüm düğmesi ekle.
+- [x] iP027 — Ağ kopmasını izle; Bağlantı bekleniyor göstergesi ve geri gelince son konumdan yeniden açma ekle.
+- [x] iP028 — 15 sn uzun tamponlamada Bağlantı yavaş — Tekrar dene uyarısı göster.
+- [x] iP029 — Yetki/kilit, bulunamadı, zaman aşımı ve biçim hatalarını Türkçe sınıflandırıp teşhise yaz.
+- [x] iP030 — VLC'nin bildirdiği akış/istatistik alanlarını gösteren Teknik bilgi sayfası ekle.
+- [x] iP031 — Ses seçimini Türkçe dil adları ve işaretli etkin seçimle düzenle.
+- [x] iP032 — Altyazı seçimini Türkçe dil adları, işaretli seçim ve Kapalı seçeneğiyle düzenle.
+- [x] iP033 — Dizi başına son ses/altyazı seçimini cihazda hatırla ve profil tercihinden önce uygula.
+- [x] iP034 — Canlı oynatıcıya açıldığı listedeki kanalları gösteren kanal paneli ekle.
+- [x] iP035 — Canlı yayında CANLI'ya dön düğmesiyle akışı yeniden aç.
+- [x] iP036 — Canlı başlığında sıradaki program bilgisini göster.
+- [x] iP037 — Filmler için Otomatik/Yatay açılış yönü cihaz ayarı ekle.
+- [x] iP038 — Varsayılan kapalı arka plan sesi ayarı ve arka planda video çizimini bırakıp sesi sürdürme akışı ekle.
+- [x] iP039 — Oynatıcı açılışından ilk kareye kadar geçen süreyi Diagnostics'e yaz.
+- [x] iP040 — Uzun süre etkileşimsiz dizi izlemeye Hâlâ izliyor musun? kontrolü ve sarma sırasında yüzde göstergesi ekle.
 
 (Paketler burada maddelerini listeler.)

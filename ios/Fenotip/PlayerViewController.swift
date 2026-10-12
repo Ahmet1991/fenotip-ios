@@ -1,12 +1,17 @@
 import MobileVLCKit
+import AVFoundation
+import AVKit
 import MediaPlayer
+import Network
 import UIKit
 
 enum FinishReason: Equatable {
     /// tv: kullanıcı "TV'ye aktar" dedi; içerik kaldığı yerden TV'de açılır.
-    case user, ended, next, error, retry, reconnect, sleep, tv, previousChannel, nextChannel
+    case user, ended, endedNoNext, next, previousEpisode, error, retry, reconnect, sleep, tv, previousChannel, nextChannel
     /// Oynatıcıdaki "Bölümler" listesinden seçilen bölüm.
     case episode(String)
+    /// Canlı kanal listesinden seçilen kanal.
+    case channel(String)
 }
 
 /// Ses/altyazı izinin dili: VLC iz adından ("Track 1 - [English]", "Türkçe") sitedeki kısa koda.
@@ -38,6 +43,16 @@ enum TrackLanguage {
         if words[value] != nil { return value }
         return words.first { _, list in list.contains(value) }?.key
     }
+
+    static func displayName(for trackName: String) -> String {
+        let names = [
+            "tr": "Türkçe", "en": "İngilizce", "de": "Almanca", "fr": "Fransızca", "es": "İspanyolca",
+            "it": "İtalyanca", "ru": "Rusça", "ar": "Arapça", "ja": "Japonca", "ko": "Korece",
+            "hi": "Hintçe", "pt": "Portekizce",
+        ]
+        guard let code = code(of: trackName) else { return trackName }
+        return names[code] ?? trackName
+    }
 }
 
 /// VLC oynatıcı: sağlayıcı adresini doğrudan açar (jetonlu yönlendirmeyi kendisi izler); MKV,
@@ -52,6 +67,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private let url: URL
     private let preferences: PlaybackPreferences
     private let allowAutomaticReconnect: Bool
+    private let autoNextEpisode: Bool
+    private let backgroundAudioEnabled = PlayerDeviceSettings.backgroundAudio
     private var audioApplied = false
     private var subtitleApplied = false
     private let player = VLCMediaPlayer()
@@ -64,6 +81,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private let resumeButton = UIButton(type: .system)
     private let retryButton = UIButton(type: .system)
     private let volumeView = MPVolumeView(frame: .zero)
+    private let routePicker = AVRoutePickerView(frame: .zero)
     private let titleLabel = UILabel()
     private let closeButton = UIButton(type: .system)
     private let subtitleButton = UIButton(type: .system)
@@ -75,8 +93,20 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private let sleepButton = UIButton(type: .system)
     private let delayButton = UIButton(type: .system)
     private let episodesButton = UIButton(type: .system)
+    private let previousEpisodeButton = UIButton(type: .system)
+    private let channelsButton = UIButton(type: .system)
+    private let liveButton = UIButton(type: .system)
+    private let technicalButton = UIButton(type: .system)
     /// Dizinin son 30 saniyesinde videonun üstünde (denetimler gizliyken de) görünen düğme.
     private let upNextButton = UIButton(type: .system)
+    private let upNextCancelButton = UIButton(type: .system)
+    private lazy var upNextStack: UIStackView = {
+        let stack = UIStackView(arrangedSubviews: [upNextButton, upNextCancelButton])
+        stack.axis = .horizontal
+        stack.spacing = 8
+        stack.alignment = .center
+        return stack
+    }()
     private enum VideoMode: Int, CaseIterable {
         case fit, fill, ratio16x9, ratio4x3
     }
@@ -99,6 +129,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private var progressTimer: Timer?
     private var startTimer: Timer?
     private var sleepTimer: Timer?
+    private var bufferTimer: Timer?
+    private var inactivityTimer: Timer?
     private var scrubbing = false
     private var finished = false
     private var started = false
@@ -121,6 +153,17 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private var pendingLongPress: DispatchWorkItem?
     private var playbackFailureHandled = false
     private var wasPlayingBeforeBackground = false
+    private var bufferWarningVisible = false
+    private var networkLost = false
+    private var suppressAutoNext = false
+    private var firstFrameLogged = false
+    private let openedAt = Date()
+    private var lastNowPlayingSecond = -1
+    private let pathMonitor = NWPathMonitor()
+    private let pathQueue = DispatchQueue(label: "fenotip.player.network")
+    private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    private static var lastSeriesInteraction = Date()
+    private static var continuingSeriesUntil: Date?
 
     private var isLive: Bool { item.kind == .live }
     private var seekBadgeCenter: NSLayoutConstraint!
@@ -133,11 +176,12 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private var pendingTap: DispatchWorkItem?
     private var doubleTapSeconds: Int { PlayerDeviceSettings.doubleTapSeekSeconds }
 
-    init(item: PlaybackItem, url: URL, preferences: PlaybackPreferences = .empty, allowAutomaticReconnect: Bool = true) {
+    init(item: PlaybackItem, url: URL, preferences: PlaybackPreferences = .empty, allowAutomaticReconnect: Bool = true, autoNextEpisode: Bool = true) {
         self.item = item
         self.url = url
         self.preferences = preferences
         self.allowAutomaticReconnect = allowAutomaticReconnect
+        self.autoNextEpisode = autoNextEpisode
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .fullScreen
         modalTransitionStyle = .crossDissolve
@@ -149,8 +193,13 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
 
     override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { landscapeLocked ? .landscape : .allButUpsideDown }
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        if landscapeLocked || (item.kind == .movie && PlayerDeviceSettings.movieOrientation == "landscape") { return .landscape }
+        return .allButUpsideDown
+    }
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        item.kind == .movie && PlayerDeviceSettings.movieOrientation == "automatic" ? .unknown : .landscapeRight
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -172,6 +221,15 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             player.perform(fontSizeSelector, with: NSNumber(value: SubtitleSize.current.rawValue))
         }
         player.media = media
+        if backgroundAudioEnabled {
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+                try AVAudioSession.sharedInstance().setActive(true)
+                Diagnostics.shared.log("arka plan sesi hazırlandı")
+            } catch {
+                Diagnostics.shared.log("arka plan sesi hazırlanamadı: \(error.localizedDescription)")
+            }
+        }
         player.play()
         if !isLive, let rate = preferences.playbackRate, rate >= 0.5, rate <= 2, rate != 1 {
             player.rate = Float(rate)
@@ -190,6 +248,17 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         }
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        setupRemoteCommands()
+        updateNowPlaying()
+        startNetworkMonitor()
+        if item.kind == .series {
+            if let until = Self.continuingSeriesUntil, until >= Date() {
+                Self.continuingSeriesUntil = nil
+            } else {
+                Self.lastSeriesInteraction = Date()
+            }
+            scheduleInactivityCheck()
+        }
         if item.startAt >= 10, !isLive {
             resumeButton.setTitle("Kaldığın yerden devam: \(format(item.startAt)) · Baştan başla", for: .normal)
             resumeButton.isHidden = false
@@ -208,7 +277,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     // MARK: Yerleşim
 
     private func buildLayout() {
-        for subview in [videoView, touchLayer, overlay, upNextButton, seekBadge, resumeButton, retryButton, closeButton, lockButton, spinner, messageLabel, volumeView] {
+        for subview in [videoView, touchLayer, overlay, upNextStack, seekBadge, resumeButton, retryButton, closeButton, lockButton, spinner, messageLabel, volumeView] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
@@ -218,6 +287,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         volumeView.showsRouteButton = false
         volumeView.alpha = 0.001
         volumeView.isUserInteractionEnabled = false
+        routePicker.tintColor = .white
+        routePicker.activeTintColor = .systemBlue
         seekBadge.textColor = .white
         seekBadge.font = .systemFont(ofSize: 17, weight: .bold)
         seekBadge.textAlignment = .center
@@ -259,13 +330,21 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         configure(sleepButton, symbol: "moon.zzz", size: 15, action: #selector(sleepTapped))
         configure(delayButton, symbol: "waveform.path", size: 15, action: #selector(delayTapped))
         configure(episodesButton, symbol: "list.bullet.rectangle", size: 15, action: #selector(episodesTapped))
+        configure(previousEpisodeButton, symbol: "backward.end.fill", size: 15, action: #selector(previousEpisodeTapped))
+        configure(channelsButton, symbol: "list.bullet", size: 15, action: #selector(channelsTapped))
+        configure(liveButton, symbol: "dot.radiowaves.left.and.right", size: 15, action: #selector(liveTapped))
+        configure(technicalButton, symbol: "info.circle", size: 15, action: #selector(technicalInfoTapped))
         episodesButton.isHidden = item.kind != .series || item.episodes.count < 2
+        previousEpisodeButton.isHidden = item.previousEpisode == nil
+        channelsButton.isHidden = !isLive || item.channels.isEmpty
+        liveButton.isHidden = !isLive
         speedButton.isHidden = isLive
         delayButton.isHidden = isLive
         for (button, title) in [
             (subtitleButton, " Altyazı"), (audioButton, " Ses"), (tvButton, " TV"), (speedButton, ""),
-            (fillButton, " Sığdır"), (episodesButton, " Bölümler"), (lockButton, " Kilit"),
-            (rotationButton, " Serbest"), (sleepButton, " Uyku"), (delayButton, " Senkron"),
+            (fillButton, " Sığdır"), (episodesButton, " Bölümler"), (previousEpisodeButton, " Önceki"),
+            (channelsButton, " Kanallar"), (liveButton, " CANLI'ya dön"), (technicalButton, " Teknik bilgi"),
+            (lockButton, " Kilit"), (rotationButton, " Serbest"), (sleepButton, " Uyku"), (delayButton, " Senkron"),
         ] {
             button.setTitle(title, for: .normal)
             button.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -327,11 +406,20 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         upNextButton.layer.cornerRadius = 22
         upNextButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 18)
         upNextButton.isHidden = true
+        upNextCancelButton.setTitle("İptal", for: .normal)
+        upNextCancelButton.setTitleColor(.white, for: .normal)
+        upNextCancelButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .semibold)
+        upNextCancelButton.backgroundColor = UIColor.black.withAlphaComponent(0.72)
+        upNextCancelButton.layer.cornerRadius = 18
+        upNextCancelButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        upNextCancelButton.addTarget(self, action: #selector(cancelUpNextTapped), for: .touchUpInside)
+        upNextCancelButton.isHidden = true
+        upNextStack.isHidden = true
 
         // Kritik üst denetimler oynatma katmanından bağımsızdır: VLC dokunuşları yutsa veya
         // otomatik gizleme çalışsa bile çıkış, altyazı ve ses her an erişilebilir kalsın.
         closeButton.translatesAutoresizingMaskIntoConstraints = false
-        let topActions = UIStackView(arrangedSubviews: [subtitleButton, audioButton])
+        let topActions = UIStackView(arrangedSubviews: [subtitleButton, audioButton, routePicker])
         topActions.axis = .horizontal
         topActions.spacing = 12
         topActions.alignment = .center
@@ -339,13 +427,13 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         view.addSubview(topActions)
         topBar = topActions
         // TV'ye aktar ve hız: denetimlerle birlikte görünür (sağ üstte, ses/altyazının altında).
-        let extras = UIStackView(arrangedSubviews: [episodesButton, tvButton, speedButton, fillButton])
+        let extras = UIStackView(arrangedSubviews: [previousEpisodeButton, episodesButton, tvButton, speedButton, fillButton])
         extras.axis = .horizontal
         extras.spacing = 12
         extras.alignment = .center
         extras.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(extras)
-        let secondaryExtras = UIStackView(arrangedSubviews: [rotationButton, sleepButton, delayButton])
+        let secondaryExtras = UIStackView(arrangedSubviews: [channelsButton, liveButton, technicalButton, rotationButton, sleepButton, delayButton])
         secondaryExtras.axis = .horizontal
         secondaryExtras.spacing = 12
         secondaryExtras.alignment = .center
@@ -421,9 +509,11 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             rotationButton.heightAnchor.constraint(equalToConstant: 38),
             sleepButton.heightAnchor.constraint(equalToConstant: 38),
             delayButton.heightAnchor.constraint(equalToConstant: 38),
-            upNextButton.heightAnchor.constraint(equalToConstant: 44),
-            upNextButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
-            upNextButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -64),
+            routePicker.widthAnchor.constraint(equalToConstant: 38),
+            routePicker.heightAnchor.constraint(equalToConstant: 38),
+            upNextStack.heightAnchor.constraint(equalToConstant: 44),
+            upNextStack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            upNextStack.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -64),
             extras.topAnchor.constraint(equalTo: topActions.bottomAnchor, constant: 10),
             extras.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
             secondaryExtras.topAnchor.constraint(equalTo: extras.bottomAnchor, constant: 10),
@@ -478,11 +568,12 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             }
         case .live:
             let program = item.programTitle ?? item.title
+            let next = item.nextProgramTitle.map { " · Sırada: \($0)" } ?? ""
             if let end = item.programEnd, end > Date().timeIntervalSince1970 {
                 let minutes = max(1, Int(ceil((end - Date().timeIntervalSince1970) / 60)))
-                titleLabel.text = "\(program) · \(minutes) dk kaldı"
+                titleLabel.text = "\(program) · \(minutes) dk kaldı\(next)"
             } else {
-                titleLabel.text = program
+                titleLabel.text = program + next
             }
         case .movie:
             titleLabel.text = item.title
@@ -532,6 +623,282 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         }
     }
 
+    private func setupRemoteCommands() {
+        let commands = MPRemoteCommandCenter.shared()
+        commands.skipForwardCommand.preferredIntervals = [10]
+        commands.skipBackwardCommand.preferredIntervals = [10]
+        remoteTargets.append((commands.playCommand, commands.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            DispatchQueue.main.async {
+                self.player.play()
+                self.userPaused = false
+                self.markInteraction()
+                self.updateNowPlaying()
+            }
+            return .success
+        }))
+        remoteTargets.append((commands.pauseCommand, commands.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            DispatchQueue.main.async {
+                self.player.pause()
+                self.userPaused = true
+                self.markInteraction()
+                self.updateNowPlaying()
+            }
+            return .success
+        }))
+        remoteTargets.append((commands.skipForwardCommand, commands.skipForwardCommand.addTarget { [weak self] _ in
+            guard let self, !self.isLive else { return .commandFailed }
+            DispatchQueue.main.async {
+                self.player.jumpForward(10)
+                self.markInteraction()
+            }
+            return .success
+        }))
+        remoteTargets.append((commands.skipBackwardCommand, commands.skipBackwardCommand.addTarget { [weak self] _ in
+            guard let self, !self.isLive else { return .commandFailed }
+            DispatchQueue.main.async {
+                self.player.jumpBackward(10)
+                self.markInteraction()
+            }
+            return .success
+        }))
+        remoteTargets.append((commands.changePlaybackPositionCommand, commands.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self,
+                  !self.isLive,
+                  self.duration > 0,
+                  let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            DispatchQueue.main.async {
+                let target = min(self.duration, max(0, event.positionTime))
+                self.player.position = Float(target / self.duration)
+                self.position = target
+                self.markInteraction()
+                self.updateNowPlaying()
+            }
+            return .success
+        }))
+        Diagnostics.shared.log("kilit ekranı medya komutları hazır")
+    }
+
+    private func updateNowPlaying() {
+        guard !finished else { return }
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: nowPlayingTitle,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
+            MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? Double(player.rate == 0 ? 1 : player.rate) : 0,
+        ]
+        if let series = item.seriesTitle { info[MPMediaItemPropertyAlbumTitle] = series }
+        if duration > 0 { info[MPMediaItemPropertyPlaybackDuration] = duration }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        guard let artwork = item.artwork, let artworkURL = URL(string: artwork) else { return }
+        URLSession.shared.dataTask(with: artworkURL) { [weak self] data, _, _ in
+            guard let self, !self.finished, let data, let image = UIImage(data: data) else { return }
+            let mediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            DispatchQueue.main.async {
+                guard !self.finished else { return }
+                var current = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                current[MPMediaItemPropertyArtwork] = mediaArtwork
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = current
+            }
+        }.resume()
+    }
+
+    private var nowPlayingTitle: String {
+        if item.kind == .series, let episode = item.episodes.first(where: { $0.id == item.contentId }) {
+            return "S\(episode.season) B\(episode.number) · \(episode.title)"
+        }
+        return item.programTitle ?? item.title
+    }
+
+    private func cleanupRemoteCommands() {
+        for (command, token) in remoteTargets { command.removeTarget(token) }
+        remoteTargets.removeAll()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    private func startNetworkMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async { self?.handleNetworkPath(path.status) }
+        }
+        pathMonitor.start(queue: pathQueue)
+    }
+
+    private func handleNetworkPath(_ status: NWPath.Status) {
+        guard !finished else { return }
+        if status != .satisfied {
+            if !networkLost {
+                networkLost = true
+                messageLabel.text = "Bağlantı bekleniyor…"
+                messageLabel.isHidden = false
+                spinner.startAnimating()
+                Diagnostics.shared.log("ağ bağlantısı kesildi; geri gelmesi bekleniyor")
+            }
+            return
+        }
+        guard networkLost else { return }
+        networkLost = false
+        Diagnostics.shared.log("ağ bağlantısı geri geldi; son konumdan yeniden açılıyor")
+        reportProgress()
+        finish(.reconnect)
+    }
+
+    private func beginBufferWatchdog() {
+        guard bufferTimer == nil else { return }
+        bufferTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            guard let self, !self.finished, self.player.state == .buffering || self.player.state == .opening else { return }
+            self.bufferWarningVisible = true
+            self.messageLabel.text = "Bağlantı yavaş — Tekrar dene"
+            self.messageLabel.isHidden = false
+            self.retryButton.isHidden = false
+            Diagnostics.shared.log("tamponlama 15 saniyeyi geçti")
+        }
+    }
+
+    private func endBufferWatchdog() {
+        bufferTimer?.invalidate()
+        bufferTimer = nil
+        if bufferWarningVisible && !networkLost {
+            bufferWarningVisible = false
+            messageLabel.isHidden = true
+            retryButton.isHidden = true
+        }
+    }
+
+    private func friendlyPlaybackError(_ raw: String) -> String {
+        let value = raw.lowercased()
+        let category: String
+        let message: String
+        if value.contains("403") || value.contains("401") || value.contains("yetki") || value.contains("kilit") {
+            category = "yetki/kilit"
+            message = "Bu içerik için erişim izni alınamadı veya yayın kilitli."
+        } else if value.contains("404") || value.contains("bulun") {
+            category = "bulunamadı"
+            message = "İçerik sağlayıcıda bulunamadı."
+        } else if value.contains("timeout") || value.contains("zaman") || value.contains("35") {
+            category = "zaman aşımı"
+            message = "Yayın zaman aşımına uğradı. Bağlantını kontrol edip tekrar dene."
+        } else if value.contains("format") || value.contains("biçim") || value.contains("codec") {
+            category = "desteklenmeyen biçim"
+            message = "Bu yayın biçimi cihazdaki oynatıcı tarafından açılamadı."
+        } else {
+            category = "oynatma"
+            message = "Yayın açılamadı. İçerik bulunamıyor, erişim süresi dolmuş veya biçim desteklenmiyor olabilir."
+        }
+        Diagnostics.shared.log("oynatma hata sınıfı: \(category); kaynak=\(raw)")
+        return message
+    }
+
+    private func rememberedTrack(_ kind: String) -> String? {
+        guard let seriesId = item.seriesId, item.kind == .series else { return nil }
+        return UserDefaults.standard.string(forKey: "fenotip.seriesTrack.\(kind).\(seriesId)")
+    }
+
+    private func rememberTrack(_ kind: String, value: String) {
+        guard let seriesId = item.seriesId, item.kind == .series else { return }
+        UserDefaults.standard.set(value, forKey: "fenotip.seriesTrack.\(kind).\(seriesId)")
+        Diagnostics.shared.log("dizi \(kind) tercihi cihazda hatırlandı")
+    }
+
+    private func trackMatches(_ name: String, wanted: String) -> Bool {
+        if wanted.hasPrefix("name:") { return name == String(wanted.dropFirst(5)) }
+        return TrackLanguage.code(of: name) == TrackLanguage.normalize(wanted)
+    }
+
+    private func markInteraction() {
+        guard item.kind == .series else { return }
+        Self.lastSeriesInteraction = Date()
+        scheduleInactivityCheck()
+    }
+
+    private func scheduleInactivityCheck() {
+        inactivityTimer?.invalidate()
+        guard item.kind == .series else { return }
+        let remaining = max(1, 7200 - Date().timeIntervalSince(Self.lastSeriesInteraction))
+        inactivityTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
+            self?.showStillWatchingPrompt()
+        }
+    }
+
+    private func showStillWatchingPrompt() {
+        guard !finished, item.kind == .series, presentedViewController == nil else {
+            scheduleInactivityCheck()
+            return
+        }
+        if player.isPlaying { player.pause() }
+        userPaused = true
+        updateNowPlaying()
+        Diagnostics.shared.log("2 saat etkileşim yok: hâlâ izliyor musun soruldu")
+        let alert = UIAlertController(title: "Hâlâ izliyor musun?", message: "Oynatma duraklatıldı.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "İzlemeye devam et", style: .default) { [weak self] _ in
+            guard let self else { return }
+            self.userPaused = false
+            self.player.play()
+            self.markInteraction()
+        })
+        alert.addAction(UIAlertAction(title: "Kapat", style: .cancel) { [weak self] _ in self?.finish(.user) })
+        present(alert, animated: true)
+    }
+
+    private func updateUpNext() {
+        guard item.nextEpisode != nil, duration > 60, !suppressAutoNext, !screenLocked else {
+            upNextStack.isHidden = true
+            return
+        }
+        let remaining = max(0, Int(ceil(duration - position)))
+        guard remaining <= 30 else {
+            upNextStack.isHidden = true
+            return
+        }
+        upNextStack.isHidden = false
+        upNextButton.isHidden = false
+        if autoNextEpisode && remaining <= 10 {
+            upNextButton.setTitle(" Şimdi oynat · \(remaining)", for: .normal)
+            upNextCancelButton.isHidden = false
+        } else {
+            upNextButton.setTitle(" Sonraki bölüm", for: .normal)
+            upNextCancelButton.isHidden = true
+        }
+    }
+
+    private func technicalInfoLines() -> [String] {
+        var lines = [
+            "Tür: \(item.kind.rawValue)",
+            "Konum: \(format(position))" + (duration > 0 ? " / \(format(duration))" : ""),
+            "Hız: \(speedText(Double(player.rate == 0 ? 1 : player.rate)))",
+            "Kaynak: \(url.pathExtension.isEmpty ? (item.ext ?? "-") : url.pathExtension)",
+        ]
+        guard let media = player.media else { return lines }
+        let tracksSelector = NSSelectorFromString("tracksInformation")
+        if media.responds(to: tracksSelector),
+           let raw = media.perform(tracksSelector)?.takeUnretainedValue() as? [[AnyHashable: Any]] {
+            for track in raw {
+                let normalized = Dictionary(uniqueKeysWithValues: track.map { (String(describing: $0.key).lowercased(), $0.value) })
+                if let width = normalized.first(where: { $0.key.contains("width") })?.value,
+                   let height = normalized.first(where: { $0.key.contains("height") })?.value {
+                    lines.append("Çözünürlük: \(width)×\(height)")
+                }
+                if let codec = normalized.first(where: { $0.key.contains("codec") })?.value {
+                    lines.append("Kodek: \(codec)")
+                }
+                if let bitrate = normalized.first(where: { $0.key.contains("bitrate") })?.value {
+                    lines.append("Bit hızı: \(bitrate)")
+                }
+            }
+        }
+        let statsSelector = NSSelectorFromString("statistics")
+        if media.responds(to: statsSelector),
+           let stats = media.perform(statsSelector)?.takeUnretainedValue() as? [AnyHashable: Any] {
+            let normalized = Dictionary(uniqueKeysWithValues: stats.map { (String(describing: $0.key).lowercased(), $0.value) })
+            if let dropped = normalized.first(where: { $0.key.contains("drop") })?.value { lines.append("Düşen kare: \(dropped)") }
+            if let bitrate = normalized.first(where: { $0.key.contains("bitrate") || $0.key.contains("input") && $0.key.contains("rate") })?.value {
+                lines.append("Akış hızı: \(bitrate)")
+            }
+        }
+        if lines.count == 4 { lines.append("VLC bu akış için ek teknik istatistik bildirmedi.") }
+        return lines
+    }
+
     /// Çift dokunuş: sol yarı geri, sağ yarı ileri; miktar cihaz ayarından gelir.
     private func doubleTapSeek(at x: CGFloat) {
         guard !isLive else { return }
@@ -546,8 +913,14 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
 
     // MARK: Denetimler
 
-    @objc private func closeTapped() { finish(.user) }
-    @objc private func tvTapped() { finish(.tv) }
+    @objc private func closeTapped() {
+        markInteraction()
+        finish(.user)
+    }
+    @objc private func tvTapped() {
+        markInteraction()
+        finish(.tv)
+    }
 
     @objc private func speedTapped() {
         let sheet = UIAlertController(title: "Oynatma hızı", message: nil, preferredStyle: .actionSheet)
@@ -572,9 +945,55 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     private func updateSpeedTitle() {
         speedButton.setTitle(" " + speedText(Double(player.rate == 0 ? 1 : player.rate)), for: .normal)
     }
-    @objc private func nextTapped() { finish(.next) }
+    @objc private func nextTapped() {
+        markInteraction()
+        finish(.next)
+    }
+
+    @objc private func previousEpisodeTapped() {
+        markInteraction()
+        haptic()
+        finish(.previousEpisode)
+    }
+
+    @objc private func cancelUpNextTapped() {
+        suppressAutoNext = true
+        upNextStack.isHidden = true
+        haptic()
+        markInteraction()
+        Diagnostics.shared.log("sonraki bölüm geri sayımı iptal edildi")
+    }
+
+    @objc private func channelsTapped() {
+        guard isLive else { return }
+        let sheet = UIAlertController(title: "Kanallar", message: item.nextProgramTitle.map { "Sıradaki: \($0)" }, preferredStyle: .actionSheet)
+        for channel in item.channels {
+            let mark = channel.id == item.contentId ? "▶ " : ""
+            sheet.addAction(UIAlertAction(title: "\(mark)\(channel.title)", style: .default) { [weak self] _ in
+                guard let self, channel.id != self.item.contentId else { return }
+                self.finish(.channel(channel.id))
+            })
+        }
+        presentSheet(sheet, from: channelsButton)
+        Diagnostics.shared.log("canlı kanal paneli açıldı")
+    }
+
+    @objc private func liveTapped() {
+        guard isLive else { return }
+        haptic()
+        Diagnostics.shared.log("CANLI'ya dön: akış yeniden açılıyor")
+        finish(.retry)
+    }
+
+    @objc private func technicalInfoTapped() {
+        let message = technicalInfoLines().joined(separator: "\n")
+        let sheet = UIAlertController(title: "Teknik bilgi", message: message, preferredStyle: .actionSheet)
+        presentSheet(sheet, from: technicalButton)
+        Diagnostics.shared.log("teknik bilgi açıldı")
+    }
 
     @objc private func playTapped() {
+        markInteraction()
         if player.isPlaying {
             player.pause()
             userPaused = true
@@ -582,11 +1001,13 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             player.play()
             userPaused = false
         }
+        updateNowPlaying()
         scheduleHide()
     }
 
     /// Bu sezonun bölümleri; seçilen bölüm kaldığı yerden açılır.
     @objc private func episodesTapped() {
+        markInteraction()
         let season = item.episodes.first { $0.id == item.contentId }?.season
         let list = item.episodes.filter { $0.season == season }
         let sheet = UIAlertController(title: season.map { "\($0). Sezon" } ?? "Bölümler", message: nil, preferredStyle: .actionSheet)
@@ -601,6 +1022,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func fillTapped() {
+        markInteraction()
         let modes = VideoMode.allCases
         videoMode = modes[(videoMode.rawValue + 1) % modes.count]
         applyVideoMode()
@@ -648,6 +1070,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func lockTapped() {
+        markInteraction()
         screenLocked.toggle()
         pendingTap?.cancel()
         pendingLongPress?.cancel()
@@ -663,7 +1086,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             topBar?.isUserInteractionEnabled = false
             lockButton.alpha = 1
             lockButton.isUserInteractionEnabled = true
-            upNextButton.isHidden = true
+            upNextStack.isHidden = true
         } else {
             setControls(visible: true)
         }
@@ -672,6 +1095,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func rotationTapped() {
+        markInteraction()
         landscapeLocked.toggle()
         rotationButton.setTitle(landscapeLocked ? " Yatay kilit" : " Serbest", for: .normal)
         setNeedsUpdateOfSupportedInterfaceOrientations()
@@ -686,6 +1110,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func sleepTapped() {
+        markInteraction()
         let sheet = UIAlertController(title: "Uyku zamanlayıcısı", message: nil, preferredStyle: .actionSheet)
         for minutes in [15, 30, 45, 60] {
             sheet.addAction(UIAlertAction(title: "\(minutes) dakika", style: .default) { [weak self] _ in
@@ -735,6 +1160,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func delayTapped() {
+        markInteraction()
         let sheet = UIAlertController(title: "Ses / altyazı senkronu", message: "0,25 sn adımlarla ayarla", preferredStyle: .actionSheet)
         sheet.addAction(UIAlertAction(title: "Altyazı −0,25 sn", style: .default) { [weak self] _ in self?.adjustDelay(subtitle: true, delta: -250_000) })
         sheet.addAction(UIAlertAction(title: "Altyazı +0,25 sn", style: .default) { [weak self] _ in self?.adjustDelay(subtitle: true, delta: 250_000) })
@@ -769,12 +1195,14 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func remainingTapped() {
+        markInteraction()
         showingFinishTime.toggle()
         updateTimeLabels()
         haptic()
     }
 
     @objc private func restartFromBeginningTapped() {
+        markInteraction()
         restartFromBeginningRequested = true
         resumeButton.isHidden = true
         if duration > 0 {
@@ -788,12 +1216,14 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func retryTapped() {
+        markInteraction()
         haptic()
         Diagnostics.shared.log("oynatma hatası: kullanıcı tekrar deniyor")
         finish(.retry)
     }
 
     @objc private func backTapped() {
+        markInteraction()
         if isLive {
             finish(.previousChannel)
             return
@@ -804,6 +1234,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func forwardTapped() {
+        markInteraction()
         if isLive {
             finish(.nextChannel)
             return
@@ -815,6 +1246,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
 
     @objc private func toggleControls() {
         guard !screenLocked else { return }
+        markInteraction()
         Diagnostics.shared.log("dokunuş: denetimler \(overlay.alpha < 0.5 ? "açılıyor" : "kapanıyor")")
         setControls(visible: overlay.alpha < 0.5)
     }
@@ -822,6 +1254,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
         guard let touch = touches.first, !(touch.view is UIControl), !finished, !screenLocked else { return }
+        markInteraction()
         pendingLongPress?.cancel()
         touchStartPoint = touch.location(in: view)
         touchStartTime = touch.timestamp
@@ -883,7 +1316,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             seekPreviewTarget = target
             let difference = Int((target - touchStartPosition).rounded())
             let sign = difference >= 0 ? "+" : "−"
-            showBadge("\(format(target)) · \(sign)\(abs(difference)) sn")
+            let percent = Int((target / duration * 100).rounded())
+            showBadge("\(format(target)) · %\(percent) · \(sign)\(abs(difference)) sn")
         case .undecided, .longPress:
             break
         }
@@ -999,29 +1433,38 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func scrubMoved() {
-        if duration > 0 { elapsedLabel.text = format(Double(slider.value) * duration) }
+        if duration > 0 {
+            let target = Double(slider.value) * duration
+            elapsedLabel.text = format(target)
+            showBadge("\(format(target)) · %\(Int((Double(slider.value) * 100).rounded()))")
+        }
     }
 
     @objc private func scrubEnded() {
         player.position = slider.value
         position = Double(slider.value) * duration
         scrubbing = false
+        hideBadge(after: 0.1)
         haptic()
         updateTimeLabels()
         scheduleHide()
     }
 
     @objc private func audioTapped() {
+        markInteraction()
         Diagnostics.shared.log("ses seçici açıldı")
         let sheet = UIAlertController(title: "Ses dili", message: nil, preferredStyle: .actionSheet)
         let names = player.audioTrackNames as? [String] ?? []
         let indexes = player.audioTrackIndexes as? [NSNumber] ?? []
         for (name, index) in zip(names, indexes) where index.int32Value >= 0 {
             let mark = index.int32Value == player.currentAudioTrackIndex ? "✓ " : ""
-            sheet.addAction(UIAlertAction(title: "\(mark)\(name)", style: .default) { [weak self] _ in
-                self?.player.currentAudioTrackIndex = index.int32Value
-                if let code = TrackLanguage.code(of: name) { self?.onPreferences?(["audioLanguage": code]) }
-                self?.updateTrackButtonTitles()
+            sheet.addAction(UIAlertAction(title: "\(mark)\(TrackLanguage.displayName(for: name))", style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.player.currentAudioTrackIndex = index.int32Value
+                let remembered = TrackLanguage.code(of: name) ?? "name:\(name)"
+                self.rememberTrack("audio", value: remembered)
+                if let code = TrackLanguage.code(of: name) { self.onPreferences?(["audioLanguage": code]) }
+                self.updateTrackButtonTitles()
             })
         }
         if sheet.actions.isEmpty { sheet.message = "Bu yayında tek ses var." }
@@ -1029,23 +1472,27 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     }
 
     @objc private func subtitlesTapped() {
+        markInteraction()
         Diagnostics.shared.log("altyazı seçici açıldı")
         let sheet = UIAlertController(title: "Altyazı", message: nil, preferredStyle: .actionSheet)
         let names = player.videoSubTitlesNames as? [String] ?? []
         let indexes = player.videoSubTitlesIndexes as? [NSNumber] ?? []
         for (name, index) in zip(names, indexes) {
             let mark = index.int32Value == player.currentVideoSubTitleIndex ? "✓ " : ""
-            let label = index.int32Value < 0 ? "Kapalı" : name
+            let label = index.int32Value < 0 ? "Kapalı" : TrackLanguage.displayName(for: name)
             sheet.addAction(UIAlertAction(title: "\(mark)\(label)", style: .default) { [weak self] _ in
-                self?.player.currentVideoSubTitleIndex = index.int32Value
+                guard let self else { return }
+                self.player.currentVideoSubTitleIndex = index.int32Value
                 if index.int32Value < 0 {
-                    self?.onPreferences?(["subtitlesEnabled": false])
+                    self.rememberTrack("subtitle", value: "off")
+                    self.onPreferences?(["subtitlesEnabled": false])
                 } else {
                     var changes: [String: Any] = ["subtitlesEnabled": true]
                     if let code = TrackLanguage.code(of: name) { changes["subtitleLanguage"] = code }
-                    self?.onPreferences?(changes)
+                    self.rememberTrack("subtitle", value: TrackLanguage.code(of: name) ?? "name:\(name)")
+                    self.onPreferences?(changes)
                 }
-                self?.updateTrackButtonTitles()
+                self.updateTrackButtonTitles()
             })
         }
         if sheet.actions.isEmpty { sheet.message = "Bu yayında altyazı yok." }
@@ -1073,16 +1520,24 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         switch player.state {
         case .playing:
             spinner.stopAnimating()
+            endBufferWatchdog()
             applyPreferredTracks()
             updateTrackButtonTitles()
+            updateNowPlaying()
         case .buffering, .opening:
             if !player.isPlaying { spinner.startAnimating() }
+            beginBufferWatchdog()
         case .ended:
-            finish(sleepAtEpisodeEnd ? .sleep : .ended)
+            endBufferWatchdog()
+            finish(sleepAtEpisodeEnd ? .sleep : (suppressAutoNext ? .endedNoNext : .ended))
         case .error:
-            handlePlaybackFailure("Yayın açılamadı. Bağlantıyı kontrol edip tekrar dene.")
+            endBufferWatchdog()
+            handlePlaybackFailure("vlc-error")
         case .stopped:
-            if !finished, !isLive, duration > 0, position >= duration - 5 { finish(.ended) }
+            endBufferWatchdog()
+            if !finished, !isLive, duration > 0, position >= duration - 5 {
+                finish(suppressAutoNext ? .endedNoNext : .ended)
+            }
         default:
             break
         }
@@ -1092,8 +1547,13 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     func mediaPlayerTimeChanged(_ aNotification: Notification) {
         started = true
         spinner.stopAnimating()
+        endBufferWatchdog()
         position = Double(player.time.intValue) / 1000
         if let length = player.media?.length.intValue, length > 0 { duration = Double(length) / 1000 }
+        if !firstFrameLogged {
+            firstFrameLogged = true
+            Diagnostics.shared.log("oynatıcı ilk kare: \(Int(Date().timeIntervalSince(openedAt) * 1000)) ms")
+        }
         if restartFromBeginningRequested, duration > 0 {
             restartFromBeginningRequested = false
             player.position = 0
@@ -1102,8 +1562,12 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         }
         updatePlayButton()
         if position < 30 { applyPreferredTracks() }
-        let nearEnd = item.nextEpisode != nil && duration > 60 && duration - position <= 30
-        if upNextButton.isHidden == nearEnd { upNextButton.isHidden = !nearEnd }
+        updateUpNext()
+        let second = Int(position)
+        if second != lastNowPlayingSecond {
+            lastNowPlayingSecond = second
+            updateNowPlaying()
+        }
         if isLive {
             updateTitle()
             return
@@ -1121,8 +1585,9 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             let indexes = player.audioTrackIndexes as? [NSNumber] ?? []
             if indexes.contains(where: { $0.int32Value >= 0 }) {
                 audioApplied = true
-                if let wanted = TrackLanguage.normalize(preferences.audioLanguage),
-                   let match = zip(names, indexes).first(where: { $0.1.int32Value >= 0 && TrackLanguage.code(of: $0.0) == wanted }),
+                let wanted = rememberedTrack("audio") ?? TrackLanguage.normalize(preferences.audioLanguage)
+                if let wanted,
+                   let match = zip(names, indexes).first(where: { $0.1.int32Value >= 0 && trackMatches($0.0, wanted: wanted) }),
                    match.1.int32Value != player.currentAudioTrackIndex {
                     player.currentAudioTrackIndex = match.1.int32Value
                     Diagnostics.shared.log("tercih edilen ses seçildi: \(match.0)")
@@ -1130,7 +1595,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             }
         }
         if !subtitleApplied {
-            if preferences.subtitlesEnabled == false {
+            let remembered = rememberedTrack("subtitle")
+            if remembered == "off" || (remembered == nil && preferences.subtitlesEnabled == false) {
                 subtitleApplied = true
                 if player.currentVideoSubTitleIndex >= 0 { player.currentVideoSubTitleIndex = -1 }
                 updateTrackButtonTitles()
@@ -1145,8 +1611,9 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             }
             subtitleApplied = true
             // "Forced" iz yalnız yabancı dildeki kısa bölümleri çevirir; tam altyazı varsa o seçilir.
-            let candidates = zip(names, indexes).filter { $0.1.int32Value >= 0 && TrackLanguage.code(of: $0.0) == TrackLanguage.normalize(preferences.subtitleLanguage) }
-            if TrackLanguage.normalize(preferences.subtitleLanguage) != nil,
+            let wanted = remembered ?? TrackLanguage.normalize(preferences.subtitleLanguage)
+            let candidates = zip(names, indexes).filter { $0.1.int32Value >= 0 && wanted.map { trackMatches($0.0, wanted: $0) } == true }
+            if wanted != nil,
                let match = candidates.first(where: { !$0.0.lowercased().contains("forced") }) ?? candidates.first {
                 player.currentVideoSubTitleIndex = match.1.int32Value
                 Diagnostics.shared.log("tercih edilen altyazı seçildi: \(match.0)")
@@ -1175,7 +1642,12 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
 
     @objc private func appWillResignActive() {
         wasPlayingBeforeBackground = player.isPlaying
-        if wasPlayingBeforeBackground { player.pause() }
+        if backgroundAudioEnabled {
+            player.drawable = nil
+            Diagnostics.shared.log("oynatıcı arka planda: video çizimi bırakıldı, ses sürüyor")
+        } else if wasPlayingBeforeBackground {
+            player.pause()
+        }
         reportProgress()
         UIApplication.shared.isIdleTimerDisabled = false
         Diagnostics.shared.log("oynatıcı arka planda: ilerleme kaydedildi")
@@ -1184,7 +1656,8 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
     @objc private func appDidBecomeActive() {
         guard !finished else { return }
         UIApplication.shared.isIdleTimerDisabled = true
-        if wasPlayingBeforeBackground, !userPaused { player.play() }
+        if backgroundAudioEnabled { player.drawable = videoView }
+        if wasPlayingBeforeBackground, !userPaused, !player.isPlaying { player.play() }
         wasPlayingBeforeBackground = false
         Diagnostics.shared.log("oynatıcı öne geldi")
     }
@@ -1198,7 +1671,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             finish(.reconnect)
             return
         }
-        fail(message)
+        fail(friendlyPlaybackError(message))
     }
 
     private func fail(_ message: String) {
@@ -1228,15 +1701,23 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
         progressTimer?.invalidate()
         startTimer?.invalidate()
         sleepTimer?.invalidate()
+        bufferTimer?.invalidate()
+        inactivityTimer?.invalidate()
         pendingTap?.cancel()
         pendingLongPress?.cancel()
+        pathMonitor.cancel()
+        cleanupRemoteCommands()
         NotificationCenter.default.removeObserver(self)
         player.delegate = nil
         Diagnostics.shared.log("oynatıcı kapanıyor: \(reason) konum=\(Int(position))/\(Int(duration))")
         stopPlayerInBackground()
         UIApplication.shared.isIdleTimerDisabled = false
         UIScreen.main.brightness = originalBrightness
-        let completedAtEnd = reason == .ended || (reason == .sleep && sleepAtEpisodeEnd)
+        if backgroundAudioEnabled { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        if item.kind == .series, reason == .ended || reason == .next {
+            Self.continuingSeriesUntil = Date().addingTimeInterval(5)
+        }
+        let completedAtEnd = reason == .ended || reason == .endedNoNext || (reason == .sleep && sleepAtEpisodeEnd)
         let finalPosition = completedAtEnd && duration > 0 ? duration : position
         let finalDuration = duration
         let callback = onFinish

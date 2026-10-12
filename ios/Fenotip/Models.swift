@@ -316,10 +316,18 @@ struct PlaybackItem: Identifiable {
     var programTitle: String? = nil
     /// Canlı: o anki programın bitiş zamanı (Unix sn); kalan dakika başlıkta gösterilir.
     var programEnd: Double? = nil
+    /// Canlı: sıradaki program bilgisi.
+    var nextProgramTitle: String? = nil
+    var nextProgramStart: Double? = nil
 
     var nextEpisode: Episode? {
         guard kind == .series, let index = episodes.firstIndex(where: { $0.id == contentId }), index + 1 < episodes.count else { return nil }
         return episodes[index + 1]
+    }
+
+    var previousEpisode: Episode? {
+        guard kind == .series, let index = episodes.firstIndex(where: { $0.id == contentId }), index > 0 else { return nil }
+        return episodes[index - 1]
     }
 }
 

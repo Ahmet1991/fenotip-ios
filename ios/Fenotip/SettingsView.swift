@@ -27,11 +27,21 @@ enum SubtitleSize: Int, CaseIterable, Identifiable {
 /// Oynatıcıda yalnız bu cihazı etkileyen ayarlar.
 enum PlayerDeviceSettings {
     static let doubleTapSeekSecondsKey = "fenotip.doubleTapSeekSeconds"
+    static let movieOrientationKey = "fenotip.movieOrientation"
+    static let backgroundAudioKey = "fenotip.backgroundAudio"
     static let doubleTapSeekOptions = [5, 10, 15, 30]
 
     static var doubleTapSeekSeconds: Int {
         let value = UserDefaults.standard.object(forKey: doubleTapSeekSecondsKey) as? Int ?? 10
         return doubleTapSeekOptions.contains(value) ? value : 10
+    }
+
+    static var movieOrientation: String {
+        UserDefaults.standard.string(forKey: movieOrientationKey) ?? "automatic"
+    }
+
+    static var backgroundAudio: Bool {
+        UserDefaults.standard.bool(forKey: backgroundAudioKey)
     }
 }
 
@@ -43,6 +53,8 @@ struct SettingsView: View {
     @State private var cacheCleared = false
     @AppStorage(SubtitleSize.storageKey) private var subtitleSize = SubtitleSize.normal.rawValue
     @AppStorage(PlayerDeviceSettings.doubleTapSeekSecondsKey) private var doubleTapSeekSeconds = 10
+    @AppStorage(PlayerDeviceSettings.movieOrientationKey) private var movieOrientation = "automatic"
+    @AppStorage(PlayerDeviceSettings.backgroundAudioKey) private var backgroundAudio = false
 
     static let languages: [(code: String, name: String)] = [
         ("tr", "Türkçe"), ("en", "İngilizce"), ("de", "Almanca"), ("fr", "Fransızca"), ("es", "İspanyolca"),
@@ -89,10 +101,15 @@ struct SettingsView: View {
                             Text("\(seconds) saniye").tag(seconds)
                         }
                     }
+                    Picker("Filmler açılırken", selection: $movieOrientation) {
+                        Text("Otomatik yön").tag("automatic")
+                        Text("Yatay").tag("landscape")
+                    }
+                    Toggle("Arka planda sesi sürdür", isOn: $backgroundAudio)
                 } header: {
                     Text("Bu cihaz")
                 } footer: {
-                    Text("Altyazı boyutu ve çift dokunuş süresi yalnız bu iPhone/iPad'de saklanır.")
+                    Text("Bu ayarlar yalnız bu iPhone/iPad'de saklanır. Arka plan sesi varsayılan olarak kapalıdır.")
                 }
                 Section("TV") {
                     if let link = tv.link {

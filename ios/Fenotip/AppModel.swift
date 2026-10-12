@@ -641,9 +641,16 @@ final class AppModel: ObservableObject {
 
     private func presentPlayer(_ playback: PlaybackItem, allowAutomaticReconnect: Bool, recordActivity: Bool) {
         var item = playback
-        if item.kind == .live, let current = nowNext(item.contentId)?.current {
-            if item.programTitle == nil { item.programTitle = current.title }
-            if item.programEnd == nil { item.programEnd = current.end }
+        if item.kind == .live {
+            let epg = nowNext(item.contentId)
+            if let current = epg?.current {
+                if item.programTitle == nil { item.programTitle = current.title }
+                if item.programEnd == nil { item.programEnd = current.end }
+            }
+            if let next = epg?.next {
+                item.nextProgramTitle = next.title
+                item.nextProgramStart = next.start
+            }
         }
         guard let url = provider?.streamURL(kind: item.kind, id: item.contentId, ext: item.ext) else { return }
         if recordActivity, item.kind == .live {
@@ -657,7 +664,8 @@ final class AppModel: ObservableObject {
             item: item,
             url: url,
             preferences: state.playbackPreferences,
-            allowAutomaticReconnect: allowAutomaticReconnect
+            allowAutomaticReconnect: allowAutomaticReconnect,
+            autoNextEpisode: state.autoNextEpisode
         )
         player.onProgress = { [weak self] position, duration in
             self?.saveProgress(kind: item.kind, id: item.contentId, position: position, duration: duration)
@@ -679,8 +687,16 @@ final class AppModel: ObservableObject {
                 Task { await self.tv.play(item, at: position) }
             case .ended where self.state.autoNextEpisode, .next:
                 if let next = item.nextEpisode { self.play(self.episodeItem(next, from: item)) }
+            case .previousEpisode:
+                if let previous = item.previousEpisode { self.play(self.episodeItem(previous, from: item)) }
             case .episode(let id):
                 if let episode = item.episodes.first(where: { $0.id == id }) { self.play(self.episodeItem(episode, from: item)) }
+            case .channel(let id):
+                if let channel = item.channels.first(where: { $0.id == id }) {
+                    var playback = channel.livePlayback
+                    playback.channels = item.channels
+                    self.play(playback)
+                }
             case .previousChannel, .nextChannel:
                 let list = item.channels
                 guard list.count > 1, let index = list.firstIndex(where: { $0.id == item.contentId }) else { break }
@@ -710,6 +726,8 @@ final class AppModel: ObservableObject {
         restarted.channels = item.channels
         restarted.programTitle = item.programTitle
         restarted.programEnd = item.programEnd
+        restarted.nextProgramTitle = item.nextProgramTitle
+        restarted.nextProgramStart = item.nextProgramStart
         return restarted
     }
 
