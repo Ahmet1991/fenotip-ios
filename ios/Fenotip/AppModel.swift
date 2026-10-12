@@ -578,10 +578,10 @@ final class AppModel: ObservableObject {
         }
         let dailyGenres = selectedGenres.compactMap { genre -> HomeShelf? in
             let moviePicks = movies.lazy.filter {
-                hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
+                self.hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
             }.prefix(30)
             let seriesPicks = seriesItems.lazy.filter {
-                hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
+                self.hasGenre($0, genre.slug) && !watchedSearchKeys.contains($0.searchKey) && $0.artwork != nil
             }.prefix(30)
             let items = Array((Array(moviePicks) + Array(seriesPicks)).prefix(48))
             guard items.count >= 4 else { return nil }
