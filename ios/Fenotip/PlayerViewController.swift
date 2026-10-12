@@ -1612,7 +1612,7 @@ final class PlayerViewController: UIViewController, VLCMediaPlayerDelegate, UIGe
             subtitleApplied = true
             // "Forced" iz yalnız yabancı dildeki kısa bölümleri çevirir; tam altyazı varsa o seçilir.
             let wanted = remembered ?? TrackLanguage.normalize(preferences.subtitleLanguage)
-            let candidates = zip(names, indexes).filter { $0.1.int32Value >= 0 && wanted.map { trackMatches($0.0, wanted: $0) } == true }
+            let candidates = zip(names, indexes).filter { pair in pair.1.int32Value >= 0 && wanted.map { trackMatches(pair.0, wanted: $0) } == true }
             if wanted != nil,
                let match = candidates.first(where: { !$0.0.lowercased().contains("forced") }) ?? candidates.first {
                 player.currentVideoSubTitleIndex = match.1.int32Value
