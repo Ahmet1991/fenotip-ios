@@ -1,0 +1,66 @@
+# Fenotip iPhone uygulaması: Mac olmadan, GitHub'ın macOS makinesinde imzasız IPA üretir.
+# IPA, AltStore/SideStore ile kişinin kendi (ücretsiz) Apple hesabıyla imzalanıp telefona kurulur.
+# Yalnız ios/ değişince ya da elle çalışır; site doğrulaması için kullanılmaz.
+name: Fenotip iOS (imzasız IPA)
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-app.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Araçlar
+        run: |
+          brew install xcodegen
+          pod --version || sudo gem install cocoapods
+          xcodebuild -version
+
+      - name: Proje
+        run: |
+          xcodegen generate
+          pod install
+
+      - name: Derle (imzasız)
+        run: |
+          set +e
+          xcodebuild -workspace Fenotip.xcworkspace -scheme Fenotip -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build.log 2>&1
+          status=$?
+          grep -E "error:|\*\* BUILD" build.log | head -80
+          if [ $status -ne 0 ]; then tail -60 build.log; exit $status; fi
+
+      - name: IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Fenotip.app Payload/
+          # İmzasız Mach-O'da imza bölümü yok; Sideloadly/AltStore değiştirecek imza bulamayınca
+          # "geçerli bir iOS uygulaması değil" diyor. Geçici (ad-hoc) imza atılır, kurulumda onlarınki gelir.
+          for framework in Payload/Fenotip.app/Frameworks/*.framework; do
+            codesign --force --sign - --timestamp=none "$framework"
+          done
+          codesign --force --sign - --timestamp=none Payload/Fenotip.app
+          codesign --verify --deep --verbose=2 Payload/Fenotip.app
+          zip -qry Fenotip.ipa Payload
+          ls -lh Fenotip.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fenotip-ipa
+          path: ios/Fenotip.ipa
+          retention-days: 30

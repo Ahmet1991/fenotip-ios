@@ -1,0 +1,50 @@
+# Fenotip iPhone uygulaması: katalog ve yayınlar doğrudan sağlayıcıdan, VLC tabanlı yerel oynatıcı.
+# Sunucuyla yalnız giriş, profil ve "kaldığın yer" senkronu konuşulur (PC ile ortak ilerleme).
+# Mac gerekmez: .github/workflows/ios-app.yml bu dosyadan (XcodeGen) projeyi kurup imzasız IPA üretir;
+# IPA, AltStore/SideStore ile kişinin kendi ücretsiz Apple hesabıyla imzalanıp kurulur.
+name: Fenotip
+options:
+  bundleIdPrefix: com.fenotip
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    # CocoaPods'un çerçeve kopyalama betiği Xcode 15+ betik kum havuzunda takılıyor.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Fenotip:
+    type: application
+    platform: iOS
+    sources:
+      - path: Fenotip
+    info:
+      path: Fenotip/Info.plist
+      properties:
+        CFBundleDisplayName: Fenotip
+        CFBundleShortVersionString: "1.2.0"
+        CFBundleVersion: "10"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Sağlayıcı ve senkron sunucusu yalnız http; uygulama içinde izin verilir.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fenotip.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+    scheme: {}
