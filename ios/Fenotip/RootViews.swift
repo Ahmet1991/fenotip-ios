@@ -201,7 +201,10 @@ struct BrandLogo: View {
 
     var body: some View {
         if UIImage(named: "Logo") != nil {
-            Image("Logo").resizable().scaledToFit().frame(height: height)
+            Image("Logo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: height * 5.5, height: height)
         } else {
             Text("fenotip")
                 .font(.system(size: height * 0.8, weight: .black, design: .rounded))
